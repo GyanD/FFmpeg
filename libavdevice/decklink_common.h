@@ -149,6 +149,10 @@ struct decklink_ctx {
 
     int channels;
     int audio_depth;
+
+    /* Fields for timecode correction */
+    unsigned long vidframeCount;        //  frameCount tracks audio as well
+    unsigned long firstframeIndex;      //  value of frameCount for first frame received over input signal
 };
 
 typedef enum { DIRECTION_IN, DIRECTION_OUT} decklink_direction_t;

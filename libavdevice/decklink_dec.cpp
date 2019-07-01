@@ -41,6 +41,7 @@ extern "C" {
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/time.h"
+#include "libavutil/timecode.h"
 #include "libavutil/mathematics.h"
 #include "libavutil/reverse.h"
 #include "avdevice.h"
@@ -736,6 +737,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         videoFrame->GetStreamTime(&frameTime, &frameDuration,
                                   ctx->video_st->time_base.den);
 
+        ctx->vidframeCount++;
+
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
             if (ctx->draw_bars && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
                 unsigned bars[8] = {
@@ -765,6 +768,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
             // Handle Timecode (if requested)
             if (ctx->tc_format) {
+                if (!ctx->firstframeIndex)
+                    ctx->firstframeIndex = ctx->vidframeCount;
                 IDeckLinkTimecode *timecode;
                 if (videoFrame->GetTimecode(ctx->tc_format, &timecode) == S_OK) {
                     const char *tc = NULL;
@@ -778,7 +783,9 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                         AVDictionary* metadata_dict = NULL;
                         int metadata_len;
                         uint8_t* packed_metadata;
+                        unsigned long offset = ctx->firstframeIndex - ctx->vidframeCount;  // represents offset of first returned frame relative to first frame with timecode
                         if (av_dict_set(&metadata_dict, "timecode", tc, AV_DICT_DONT_STRDUP_VAL) >= 0) {
+                            av_dict_set_int(&metadata_dict, "tc_offset", offset, 0);
                             packed_metadata = av_packet_pack_dictionary(metadata_dict, &metadata_len);
                             av_dict_free(&metadata_dict);
                             if (packed_metadata) {
@@ -880,6 +887,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             videoFrame->AddRef();
 
         if (avpacket_queue_put(&ctx->queue, &pkt) < 0) {
+            if (ctx->firstframeIndex == ctx->vidframeCount)
+                ctx->firstframeIndex = 0;
             ++ctx->dropped;
         }
     }
@@ -1266,10 +1275,48 @@ int ff_decklink_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     if (ctx->tc_format && !(av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0))) {
         int size;
         const uint8_t *side_metadata = av_packet_get_side_data(pkt, AV_PKT_DATA_STRINGS_METADATA, &size);
+
         if (side_metadata) {
-           if (av_packet_unpack_dictionary(side_metadata, size, &ctx->video_st->metadata) < 0)
-               av_log(avctx, AV_LOG_ERROR, "Unable to set timecode\n");
-        }
+            char offset_tc[AV_TIMECODE_STR_SIZE];
+            int ret;
+            AVTimecode tc;
+            AVRational vid_rate = ctx->video_st->r_frame_rate;
+            int64_t offset = 0;
+            AVDictionary *first_tc = NULL;
+            AVDictionaryEntry *tcstr = NULL;
+            AVDictionaryEntry *offsetstr = NULL;
+
+            if (av_packet_unpack_dictionary(side_metadata, size, &first_tc) < 0 ||
+                !(tcstr = av_dict_get(first_tc, "timecode", NULL, 0)) ) {
+                av_log(avctx, AV_LOG_ERROR, "Unable to find timecode\n");
+                return 0;
+            }
+
+            if (tcstr)
+                av_log(avctx, AV_LOG_DEBUG, "Serial frame timecode is %s.\n", tcstr->value);
+
+            if (av_timecode_init_from_string(&tc, vid_rate, tcstr->value, avctx) < 0) {
+                av_log(avctx, AV_LOG_ERROR, "Unable to set timecode\n");
+                return 0;
+            }
+
+            offsetstr = av_dict_get(first_tc, "tc_offset", NULL, 0);
+            if (offsetstr) {
+                offset = strtol(offsetstr->value, NULL, 10);
+                av_log(avctx, AV_LOG_INFO, "Timecode offset is %" PRId64 ".\n", offset);
+            } else
+                av_log(avctx, AV_LOG_WARNING, "Unable to get correction offset for timecode.\n");
+
+            ret = av_dict_set(&ctx->video_st->metadata, "timecode", av_timecode_make_string(&tc, offset_tc, offset), 0);
+            if (ret >= 0)
+                av_log(avctx, AV_LOG_INFO, "Timecode %s after offset of %" PRId64 " is stored.\n", offset_tc, offset);
+            else
+                av_log(avctx, AV_LOG_ERROR, "Unable to store timecode.\n");
+
+            return 0;
+
+        } else
+              av_log(avctx, AV_LOG_TRACE, "No timecode side data found as of pkt pts %" PRId64 "\n", pkt->pts);
     }
 
     return 0;
