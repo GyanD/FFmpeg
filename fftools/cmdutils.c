@@ -1148,7 +1148,7 @@ static void print_program_info(int flags, int level)
 {
     const char *indent = flags & INDENT? "  " : "";
 
-    av_log(NULL, level, "%s version " FFMPEG_VERSION, program_name);
+    av_log(NULL, level, "%s version bmtc3 20191003-v1" FFMPEG_VERSION, program_name);
     if (flags & SHOW_COPYRIGHT)
         av_log(NULL, level, " Copyright (c) %d-%d the FFmpeg developers",
                program_birth_year, CONFIG_THIS_YEAR);

@@ -770,6 +770,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                     const char *tc = NULL;
                     DECKLINK_STR decklink_tc;
                     if (timecode->GetString(&decklink_tc) == S_OK) {
+av_log(avctx, AV_LOG_DEBUG, "decklink frame tc %ls for fc %lu", decklink_tc, ctx->frameCount);
                         tc = DECKLINK_STRDUP(decklink_tc);
                         DECKLINK_FREE(decklink_tc);
                     }
@@ -778,6 +779,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                         AVDictionary* metadata_dict = NULL;
                         int metadata_len;
                         uint8_t* packed_metadata;
+av_log(avctx, AV_LOG_DEBUG, "local frame tc %s for fc %lu", tc, ctx->frameCount);
                         if (av_dict_set(&metadata_dict, "timecode", tc, AV_DICT_DONT_STRDUP_VAL) >= 0) {
                             packed_metadata = av_packet_pack_dictionary(metadata_dict, &metadata_len);
                             av_dict_free(&metadata_dict);
@@ -785,7 +787,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                                 if (av_packet_add_side_data(&pkt, AV_PKT_DATA_STRINGS_METADATA, packed_metadata, metadata_len) < 0)
                                     av_freep(&packed_metadata);
                                 else if (!ctx->tc_seen)
-                                    ctx->tc_seen = 1;
+                                    ctx->tc_seen = ctx->frameCount;
                             }
                         }
                     }
@@ -794,7 +796,7 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
                 }
             }
         }
-
+av_log(avctx, AV_LOG_DEBUG, "Frame (#%lu) - tc_seen is %lu\n", ctx->frameCount, ctx->tc_seen);
         if (ctx->tc_format && cctx->wait_for_tc && !ctx->tc_seen) {
 
             av_log(avctx, AV_LOG_WARNING, "No TC detected yet. wait_for_tc set. Dropping. \n");
@@ -890,6 +892,8 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
             videoFrame->AddRef();
 
         if (avpacket_queue_put(&ctx->queue, &pkt) < 0) {
+            if (ctx->tc_seen == ctx->frameCount)
+                ctx->tc_seen = 0;
             ++ctx->dropped;
         }
     }
@@ -1279,6 +1283,10 @@ int ff_decklink_read_packet(AVFormatContext *avctx, AVPacket *pkt)
         if (side_metadata) {
            if (av_packet_unpack_dictionary(side_metadata, size, &ctx->video_st->metadata) < 0)
                av_log(avctx, AV_LOG_ERROR, "Unable to set timecode\n");
+AVDictionaryEntry *tcstr = NULL;
+tcstr = av_dict_get(ctx->video_st->metadata, "timecode", NULL, 0);
+if (tcstr)
+    av_log(avctx, AV_LOG_DEBUG, "Stored timecode is %s, tc seen on %lu, current fc is %lu\n", tcstr->value, ctx->tc_seen, ctx->frameCount);
         }
     }
 
